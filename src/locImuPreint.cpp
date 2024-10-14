@@ -373,7 +373,6 @@ public:
         // add imu bias between factor
         graphFactors.add(gtsam::BetweenFactor<gtsam::imuBias::ConstantBias>(B(key - 1), B(key), gtsam::imuBias::ConstantBias(),
                          gtsam::noiseModel::Diagonal::Sigmas(sqrt(imuIntegratorOpt_->deltaTij()) * noiseModelBetweenBias)));
-
         // add pose factor
         gtsam::Pose3 curPose = lidarPose.compose(lidar2Imu);
         gtsam::PriorFactor<gtsam::Pose3> pose_factor(X(key), curPose, degenerate ? correctionNoise2 : correctionNoise);
@@ -403,7 +402,6 @@ public:
             return;
         }
 
-        // std::cout << prevBias_ << std::endl;
 
         // 2. after optiization, re-propagate imu odometry preintegration
         prevStateOdom = prevState_;

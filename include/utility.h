@@ -14,6 +14,7 @@
 #include <nav_msgs/Path.h>
 #include <visualization_msgs/Marker.h>
 #include <visualization_msgs/MarkerArray.h>
+#include <geometry_msgs/PoseWithCovarianceStamped.h>
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -151,6 +152,9 @@ public:
     float globalMapVisualizationPoseDensity;
     float globalMapVisualizationLeafSize;
 
+    // riboha
+    bool manualInitialPose;
+
     ParamServer()
     {
         nh.param<std::string>("/robot_id", robot_id, "roboat");
@@ -245,6 +249,9 @@ public:
         nh.param<float>("lio_sam/globalMapVisualizationSearchRadius", globalMapVisualizationSearchRadius, 1e3);
         nh.param<float>("lio_sam/globalMapVisualizationPoseDensity", globalMapVisualizationPoseDensity, 10.0);
         nh.param<float>("lio_sam/globalMapVisualizationLeafSize", globalMapVisualizationLeafSize, 1.0);
+
+        // riboha
+        nh.param<bool>("lio_sam/manualInitialPose", manualInitialPose, true);
 
         usleep(100);
     }

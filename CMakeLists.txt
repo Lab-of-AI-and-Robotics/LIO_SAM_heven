@@ -19,6 +19,7 @@ find_package(catkin REQUIRED COMPONENTS
   nav_msgs
   message_generation
   visualization_msgs
+  fast_gicp
 )
 
 find_package(OpenMP REQUIRED)
@@ -100,3 +101,13 @@ target_link_libraries(${PROJECT_NAME}_mapOptmization Boost::timer ${catkin_LIBRA
 # IMU Preintegration
 add_executable(${PROJECT_NAME}_imuPreintegration src/imuPreintegration.cpp)
 target_link_libraries(${PROJECT_NAME}_imuPreintegration Boost::timer ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} gtsam)
+
+# Mapping Optimization (Localization module)
+add_executable(${PROJECT_NAME}_loc_mapOptmization src/locmapOpt.cpp)
+add_dependencies(${PROJECT_NAME}_loc_mapOptmization ${catkin_EXPORTED_TARGETS} ${PROJECT_NAME}_generate_messages_cpp)
+target_compile_options(${PROJECT_NAME}_loc_mapOptmization PRIVATE ${OpenMP_CXX_FLAGS})
+target_link_libraries(${PROJECT_NAME}_loc_mapOptmization Boost::timer ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} ${OpenMP_CXX_FLAGS} gtsam fast_gicp)
+
+# IMU Preintegration (Localization module)
+add_executable(${PROJECT_NAME}_loc_imuPreintegration src/locImuPreint.cpp)
+target_link_libraries(${PROJECT_NAME}_loc_imuPreintegration Boost::timer ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} gtsam)
