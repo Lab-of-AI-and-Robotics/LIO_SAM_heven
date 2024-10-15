@@ -186,10 +186,10 @@ public:
     Eigen::Affine3f incrementalOdometryAffineFront;
     Eigen::Affine3f incrementalOdometryAffineBack;
 
-    // riboha
     bool initialized = false;
     bool needReLocalize = true;
     float reLocPose[6];
+    bool odomGicpConverged = false;
 
     fast_gicp::FastGICP<pcl::PointXYZ, pcl::PointXYZ> gicp;
     fast_gicp::FastGICP<pcl::PointXYZ, pcl::PointXYZ> gicp_thread;
@@ -330,7 +330,7 @@ public:
         readSavedMap(mapDir);
 
         //// downsample
-        double downsample_resolution = 0.4;
+        double downsample_resolution = 0.2;
         gicpMapVoxelGrid.setLeafSize(downsample_resolution, downsample_resolution, downsample_resolution);
         gicpMapVoxelGrid.setInputCloud(laserCloudRawPriorMap);
 
@@ -2016,7 +2016,8 @@ public:
         
         // get results
         Eigen::Matrix4d resultT = gicp.getFinalTransformation().cast<double>();
-        // std::cout << resultT << std::endl;
+        double fitness_score = gicp.getFitnessScore();
+        std::cout << fitness_score << std::endl;
 
         // set current pose using the result of g-icp
         resultTransformPriorMap[3] = resultT(0,3);  // x
@@ -2028,6 +2029,12 @@ public:
         resultTransformPriorMap[0] = euler_angles(0);
         resultTransformPriorMap[1] = euler_angles(1);
         resultTransformPriorMap[2] = euler_angles(2);
+
+        if (fitness_score > 0.5) {
+            odomGicpConverged = false;
+        } else {
+            odomGicpConverged = true;
+        }
     }
 
     void transformUpdate(float* resultTransform, bool update)
@@ -2085,6 +2092,12 @@ public:
                 return true;
         }
 
+        // 미끄러짐 대처를 위한 임시방편
+        // if (timeLaserInfoCur - cloudKeyPoses6D->back().time > 1.0)
+        //     return true;
+
+        // double-check
+        // feature matching
         Eigen::Affine3f transStart = pclPointToAffine3f(cloudKeyPoses6D->back());
         Eigen::Affine3f transFinal = pcl::getTransformation(transformTobeMapped[3], transformTobeMapped[4], transformTobeMapped[5], 
                                                             transformTobeMapped[0], transformTobeMapped[1], transformTobeMapped[2]);
@@ -2095,9 +2108,22 @@ public:
         if (abs(roll)  < surroundingkeyframeAddingAngleThreshold &&
             abs(pitch) < surroundingkeyframeAddingAngleThreshold && 
             abs(yaw)   < surroundingkeyframeAddingAngleThreshold &&
-            sqrt(x*x + y*y + z*z) < surroundingkeyframeAddingDistThreshold)
-            return false;
+            sqrt(x*x + y*y + z*z) < surroundingkeyframeAddingDistThreshold) {
 
+            // gicp
+            if (odomGicpConverged) {
+                transFinal = pcl::getTransformation(resultTransformPriorMap[3], resultTransformPriorMap[4], resultTransformPriorMap[5], 
+                                                resultTransformPriorMap[0], resultTransformPriorMap[1], resultTransformPriorMap[2]);
+                transBetween = transStart.inverse() * transFinal;
+                pcl::getTranslationAndEulerAngles(transBetween, x, y, z, roll, pitch, yaw);
+
+                if (abs(roll)  < surroundingkeyframeAddingAngleThreshold &&
+                    abs(pitch) < surroundingkeyframeAddingAngleThreshold && 
+                    abs(yaw)   < surroundingkeyframeAddingAngleThreshold &&
+                    sqrt(x*x + y*y + z*z) < surroundingkeyframeAddingDistThreshold) {return false;}
+                
+            } else { return false;}
+        }
         return true;
     }
 
@@ -2116,11 +2142,13 @@ public:
             gtSAMgraph.add(BetweenFactor<Pose3>(cloudKeyPoses3D->size()-1, cloudKeyPoses3D->size(), poseFrom.between(poseTo), odometryNoise));
             initialEstimate.insert(cloudKeyPoses3D->size(), poseTo);
             // prior map factor
-            odometryNoise = noiseModel::Diagonal::Variances((Vector(6) << 1e-5, 1e-5, 1e-5, 1e-4, 1e-4, 1e-4).finished());
-            gtsam::Pose3 poseOnMap   = trans2gtsamPose(resultTransformPriorMap);
-            // gtSAMgraph.add(BetweenFactor<Pose3>(cloudKeyPoses3D->size()-1, cloudKeyPoses3D->size(), poseFrom.between(poseOnMap), odometryNoise));
-            gtsam::PriorFactor<gtsam::Pose3> onPriorMapFactor(cloudKeyPoses3D->size(), poseOnMap, odometryNoise);
-            gtSAMgraph.add(onPriorMapFactor);
+            if (odomGicpConverged) {
+                odometryNoise = noiseModel::Diagonal::Variances((Vector(6) << 1e-4, 1e-4, 1e-4, 1e-3, 1e-3, 1e-3).finished());
+                gtsam::Pose3 poseOnMap   = trans2gtsamPose(resultTransformPriorMap);
+                gtsam::PriorFactor<gtsam::Pose3> onPriorMapFactor(cloudKeyPoses3D->size(), poseOnMap, odometryNoise);
+                gtSAMgraph.add(onPriorMapFactor);
+            }
+            
         }
     }
 
@@ -2245,14 +2273,14 @@ public:
         isam->update(gtSAMgraph, initialEstimate);
         isam->update();
 
-        if (aLoopIsClosed == true)
-        {
-            isam->update();
-            isam->update();
-            isam->update();
-            isam->update();
-            isam->update();
-        }
+        // if (aLoopIsClosed == true)
+        // {
+        //     isam->update();
+        //     isam->update();
+        //     isam->update();
+        //     isam->update();
+        //     isam->update();
+        // }
 
         gtSAMgraph.resize(0);
         initialEstimate.clear();
@@ -2288,6 +2316,11 @@ public:
         // cout << isam->marginalCovariance(isamCurrentEstimate.size()-1) << endl << endl;
         poseCovariance = isam->marginalCovariance(isamCurrentEstimate.size()-1);
 
+        // counter for pose correction
+        if (isamCurrentEstimate.size()%5==0) {
+            aLoopIsClosed = true;
+        }
+
         // save updated transform
         transformTobeMapped[0] = latestEstimate.rotation().roll();
         transformTobeMapped[1] = latestEstimate.rotation().pitch();
@@ -2295,8 +2328,6 @@ public:
         transformTobeMapped[3] = latestEstimate.translation().x();
         transformTobeMapped[4] = latestEstimate.translation().y();
         transformTobeMapped[5] = latestEstimate.translation().z();
-
-        *resultTransformPriorMap = *transformTobeMapped;
 
         // save all the received edge and surf points
         pcl::PointCloud<PointType>::Ptr thisCornerKeyFrame(new pcl::PointCloud<PointType>());
@@ -2500,12 +2531,12 @@ int main(int argc, char** argv)
 
     ROS_INFO("\033[1;32m----> Map Optimization Started.\033[0m");
     
-    std::thread loopthread(&mapOptimization::loopClosureThread, &MO);
+    // std::thread loopthread(&mapOptimization::loopClosureThread, &MO);
     std::thread visualizeMapThread(&mapOptimization::visualizeGlobalMapThread, &MO);
 
     ros::spin();
 
-    loopthread.join();
+    // loopthread.join();
     visualizeMapThread.join();
 
     return 0;
