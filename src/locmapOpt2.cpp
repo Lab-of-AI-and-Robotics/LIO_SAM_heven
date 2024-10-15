@@ -2109,9 +2109,6 @@ public:
             gtSAMgraph.add(PriorFactor<Pose3>(0, trans2gtsamPose(transformTobeMapped), priorNoise));
             initialEstimate.insert(0, trans2gtsamPose(transformTobeMapped));
         }else{
-            std::cout << "tobemapped " << transformTobeMapped[3] << std::endl;
-            std::cout << "prior " << resultTransformPriorMap[3] << std::endl;
-
             noiseModel::Diagonal::shared_ptr odometryNoise = noiseModel::Diagonal::Variances((Vector(6) << 1e-6, 1e-6, 1e-6, 1e-4, 1e-4, 1e-4).finished());
             gtsam::Pose3 poseFrom = pclPointTogtsamPose3(cloudKeyPoses6D->points.back());
             // current map factor
@@ -2119,9 +2116,11 @@ public:
             gtSAMgraph.add(BetweenFactor<Pose3>(cloudKeyPoses3D->size()-1, cloudKeyPoses3D->size(), poseFrom.between(poseTo), odometryNoise));
             initialEstimate.insert(cloudKeyPoses3D->size(), poseTo);
             // prior map factor
-            odometryNoise = noiseModel::Diagonal::Variances((Vector(6) << 1e-4, 1e-4, 1e-4, 1e-3, 1e-3, 1e-3).finished());
-            gtsam::Pose3 poseTo_   = trans2gtsamPose(resultTransformPriorMap);
-            gtSAMgraph.add(BetweenFactor<Pose3>(cloudKeyPoses3D->size()-1, cloudKeyPoses3D->size(), poseFrom.between(poseTo_), odometryNoise));
+            odometryNoise = noiseModel::Diagonal::Variances((Vector(6) << 1e-5, 1e-5, 1e-5, 1e-4, 1e-4, 1e-4).finished());
+            gtsam::Pose3 poseOnMap   = trans2gtsamPose(resultTransformPriorMap);
+            // gtSAMgraph.add(BetweenFactor<Pose3>(cloudKeyPoses3D->size()-1, cloudKeyPoses3D->size(), poseFrom.between(poseOnMap), odometryNoise));
+            gtsam::PriorFactor<gtsam::Pose3> onPriorMapFactor(cloudKeyPoses3D->size(), poseOnMap, odometryNoise);
+            gtSAMgraph.add(onPriorMapFactor);
         }
     }
 
