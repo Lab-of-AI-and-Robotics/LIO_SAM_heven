@@ -1,3 +1,5 @@
+#include <fast_gicp/gicp/fast_gicp.hpp>
+#include <pcl/filters/approximate_voxel_grid.h>
 
 #include "utility.h"
 #include "lio_sam/cloud_info.h"
@@ -154,6 +156,7 @@ public:
     double timeLaserInfoCur;
 
     float transformTobeMapped[6];
+    float transformTobeMappedGICP[6];
 
     std::mutex mtx;
     std::mutex mtxLoopInfo;
@@ -178,7 +181,14 @@ public:
     Eigen::Affine3f transPointAssociateToMap;
     Eigen::Affine3f incrementalOdometryAffineFront;
     Eigen::Affine3f incrementalOdometryAffineBack;
+    float overlapRate;
 
+    // for gicp
+    pcl::PointCloud<pcl::PointXYZ>::Ptr laserCloudRaw;
+    fast_gicp::FastGICP<pcl::PointXYZ, pcl::PointXYZ> gicp;
+    pcl::ApproximateVoxelGrid<pcl::PointXYZ> gicpSourceVoxelGrid;
+    bool odomGicpConverged = false;
+    bool existTarget = false;
 
     mapOptimization()
     {
@@ -255,9 +265,19 @@ public:
 
         for (int i = 0; i < 6; ++i){
             transformTobeMapped[i] = 0;
+            transformTobeMappedGICP[i] = 0;
         }
 
         matP = cv::Mat(6, 6, CV_32F, cv::Scalar::all(0));
+
+        laserCloudRaw.reset(new pcl::PointCloud<pcl::PointXYZ>());
+        if (useGICPforSLAM) {
+            gicp.setMaxCorrespondenceDistance(1.0);
+            gicp.setNumThreads(16);
+            gicp.setCorrespondenceRandomness(20);
+
+            gicpSourceVoxelGrid.setLeafSize(0.2, 0.2, 0.2);
+        }
     }
 
     void laserCloudInfoHandler(const lio_sam::cloud_infoConstPtr& msgIn)
@@ -273,6 +293,8 @@ public:
 
         std::lock_guard<std::mutex> lock(mtx);
 
+        pcl::fromROSMsg(msgIn->cloud_deskewed,  *laserCloudRaw);
+
         static double timeLastProcessing = -1;
         if (timeLaserInfoCur - timeLastProcessing >= mappingProcessInterval)
         {
@@ -286,6 +308,10 @@ public:
 
             scan2MapOptimization();
 
+            if (useGICPforSLAM) {
+                testGICP();
+            }
+
             saveKeyFramesAndFactor();
 
             correctPoses();
@@ -293,6 +319,73 @@ public:
             publishOdometry();
 
             publishFrames();
+
+        }
+    }
+
+    // void setGICPTarget()
+    // {
+    //     gicp.clearTarget();
+    //     pcl::PointCloud<pcl::PointXYZ>::Ptr transformedSource(new pcl::PointCloud<pcl::PointXYZ>);
+    //     *transformedSource = *transformPointCloudXYZ(laserCloudRaw, transformTobeMapped);
+    //     gicpSourceVoxelGrid.setInputCloud(transformedSource);
+
+    //     pcl::PointCloud<pcl::PointXYZ>::Ptr source(new pcl::PointCloud<pcl::PointXYZ>);
+    //     gicpSourceVoxelGrid.filter(*source);
+    //     gicp.setInputTarget(source);
+    //     existTarget = true;
+    // }
+
+    // gicp test
+    // scan2MapOptimization 함수를 대체
+    void testGICP() 
+    {
+        if (cloudKeyPoses3D->points.empty())
+            return;
+
+        gicp.clearSource();
+        // downsample raw scan
+        gicpSourceVoxelGrid.setInputCloud(laserCloudRaw);
+        pcl::PointCloud<pcl::PointXYZ>::Ptr source(new pcl::PointCloud<pcl::PointXYZ>);
+        gicpSourceVoxelGrid.filter(*source);
+        gicp.setInputSource(source);
+
+        // initial guess for gicp, current pose on the prior map
+        Eigen::Affine3d initialGuess_;
+        Eigen::Matrix4f initialGuess;
+        initialGuess_ = pcl::getTransformation( transformTobeMapped[3], // x
+                                                transformTobeMapped[4], // y
+                                                transformTobeMapped[5], // z
+                                                transformTobeMapped[0], // roll
+                                                transformTobeMapped[1], // pitch
+                                                transformTobeMapped[2]).cast<double>(); // yaw
+        initialGuess = initialGuess_.matrix().cast<float>();
+
+        // scan matching with G-ICP
+        pcl::PointCloud<pcl::PointXYZ>::Ptr aligned(new pcl::PointCloud<pcl::PointXYZ>);
+        gicp.align(*aligned, initialGuess);
+        
+        // get results
+        Eigen::Matrix4d resultT = gicp.getFinalTransformation().cast<double>();
+        double fitness_score = gicp.getFitnessScore();
+
+        // set current pose using the result of g-icp
+        transformTobeMappedGICP[3] = resultT(0,3);  // x
+        transformTobeMappedGICP[4] = resultT(1,3);  // y
+        transformTobeMappedGICP[5] = resultT(2,3);  // z
+
+        Eigen::Matrix3d rot = resultT.block<3, 3>(0, 0);
+        Eigen::Vector3d euler_angles = rot.eulerAngles(0, 1, 2);
+        transformTobeMappedGICP[0] = euler_angles(0);
+        transformTobeMappedGICP[1] = euler_angles(1);
+        transformTobeMappedGICP[2] = euler_angles(2);
+
+        // std::cout << fitness_score << std::endl;
+
+        if (fitness_score > 0.5) {
+            odomGicpConverged = false;
+        } else {
+            odomGicpConverged = true;
         }
     }
 
@@ -326,6 +419,26 @@ public:
             cloudOut->points[i].y = transCur(1,0) * pointFrom.x + transCur(1,1) * pointFrom.y + transCur(1,2) * pointFrom.z + transCur(1,3);
             cloudOut->points[i].z = transCur(2,0) * pointFrom.x + transCur(2,1) * pointFrom.y + transCur(2,2) * pointFrom.z + transCur(2,3);
             cloudOut->points[i].intensity = pointFrom.intensity;
+        }
+        return cloudOut;
+    }
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr transformPointCloudXYZ(pcl::PointCloud<pcl::PointXYZ>::Ptr cloudIn, float* transformIn)
+    {
+        pcl::PointCloud<pcl::PointXYZ>::Ptr cloudOut(new pcl::PointCloud<pcl::PointXYZ>());
+
+        int cloudSize = cloudIn->size();
+        cloudOut->resize(cloudSize);
+
+        Eigen::Affine3f transCur = pcl::getTransformation(transformIn[3], transformIn[4], transformIn[5], transformIn[0], transformIn[1], transformIn[2]);
+        
+        #pragma omp parallel for num_threads(numberOfCores)
+        for (int i = 0; i < cloudSize; ++i)
+        {
+            const auto &pointFrom = cloudIn->points[i];
+            cloudOut->points[i].x = transCur(0,0) * pointFrom.x + transCur(0,1) * pointFrom.y + transCur(0,2) * pointFrom.z + transCur(0,3);
+            cloudOut->points[i].y = transCur(1,0) * pointFrom.x + transCur(1,1) * pointFrom.y + transCur(1,2) * pointFrom.z + transCur(1,3);
+            cloudOut->points[i].z = transCur(2,0) * pointFrom.x + transCur(2,1) * pointFrom.y + transCur(2,2) * pointFrom.z + transCur(2,3);
         }
         return cloudOut;
     }
@@ -956,6 +1069,19 @@ public:
         // clear map cache if too large
         if (laserCloudMapContainer.size() > 1000)
             laserCloudMapContainer.clear();
+
+        if (useGICPforSLAM) {
+            gicp.clearTarget();
+            pcl::PointCloud<pcl::PointXYZ>::Ptr GICPLocalMapSurf(new pcl::PointCloud<pcl::PointXYZ>);
+            pcl::PointCloud<pcl::PointXYZ>::Ptr GICPLocalMapCorner(new pcl::PointCloud<pcl::PointXYZ>);
+            pcl::PointCloud<pcl::PointXYZ>::Ptr GICPLocalMapConbined(new pcl::PointCloud<pcl::PointXYZ>);
+
+            pcl::copyPointCloud(*laserCloudSurfFromMapDS, *GICPLocalMapSurf);
+            pcl::copyPointCloud(*laserCloudCornerFromMapDS, *GICPLocalMapCorner);
+
+            *GICPLocalMapConbined = *GICPLocalMapSurf + *GICPLocalMapCorner;
+            gicp.setInputTarget(GICPLocalMapConbined);
+        }
     }
 
     void extractSurroundingKeyFrames()
@@ -1325,9 +1451,53 @@ public:
             }
 
             transformUpdate();
+            checkOverlap();
         } else {
             ROS_WARN("Not enough features! Only %d edge and %d planar features available.", laserCloudCornerLastDSNum, laserCloudSurfLastDSNum);
         }
+    }
+
+    // only surface points
+    void checkOverlap()
+    {
+        updatePointAssociateToMap();
+        int count = 0;
+
+        #pragma omp parallel for num_threads(numberOfCores)
+        for (int i = 0; i < laserCloudSurfLastDSNum; i++)
+        {
+            PointType pointOri, pointSel, coeff;
+            std::vector<int> pointSearchInd;
+            std::vector<float> pointSearchSqDis;
+
+            pointOri = laserCloudSurfLastDS->points[i];
+            pointAssociateToMap(&pointOri, &pointSel); 
+            kdtreeSurfFromMap->nearestKSearch(pointSel, 1, pointSearchInd, pointSearchSqDis);
+
+            if (pointSearchSqDis[0] < 0.1) {
+                #pragma omp atomic
+                count++;
+            } 
+        }
+        
+        // #pragma omp parallel for num_threads(numberOfCores)
+        // for (int i = 0; i < laserCloudCornerLastDSNum; i++)
+        // {
+        //     PointType pointOri, pointSel, coeff;
+        //     std::vector<int> pointSearchInd;
+        //     std::vector<float> pointSearchSqDis;
+
+        //     pointOri = laserCloudCornerLastDS->points[i];
+        //     pointAssociateToMap(&pointOri, &pointSel);
+        //     kdtreeCornerFromMap->nearestKSearch(pointSel, 1, pointSearchInd, pointSearchSqDis);
+
+        //     if (pointSearchSqDis[0] < 0.1) {
+        //         #pragma omp atomic
+        //         count++;
+        //     } 
+        // }
+
+        overlapRate = static_cast<float>(count) / (laserCloudSurfLastDSNum);
     }
 
     void transformUpdate()
@@ -1389,13 +1559,35 @@ public:
         Eigen::Affine3f transBetween = transStart.inverse() * transFinal;
         float x, y, z, roll, pitch, yaw;
         pcl::getTranslationAndEulerAngles(transBetween, x, y, z, roll, pitch, yaw);
+        
 
         if (abs(roll)  < surroundingkeyframeAddingAngleThreshold &&
             abs(pitch) < surroundingkeyframeAddingAngleThreshold && 
             abs(yaw)   < surroundingkeyframeAddingAngleThreshold &&
-            sqrt(x*x + y*y + z*z) < surroundingkeyframeAddingDistThreshold)
-            return false;
+            sqrt(x*x + y*y + z*z) < surroundingkeyframeAddingDistThreshold) {
 
+            if (useGICPforSLAM) {
+                // gicp
+                if (odomGicpConverged) {
+                    transFinal = pcl::getTransformation(transformTobeMappedGICP[3], transformTobeMappedGICP[4], transformTobeMappedGICP[5], 
+                                                    transformTobeMappedGICP[0], transformTobeMappedGICP[1], transformTobeMappedGICP[2]);
+                    transBetween = transStart.inverse() * transFinal;
+                    pcl::getTranslationAndEulerAngles(transBetween, x, y, z, roll, pitch, yaw);
+
+                    if (abs(roll)  < surroundingkeyframeAddingAngleThreshold &&
+                        abs(pitch) < surroundingkeyframeAddingAngleThreshold && 
+                        abs(yaw)   < surroundingkeyframeAddingAngleThreshold &&
+                        sqrt(x*x + y*y + z*z) < surroundingkeyframeAddingDistThreshold) {
+                            return false;
+                    }
+                } else { 
+                    return false;
+                }
+            } else {
+                return false;
+            }
+            
+        }
         return true;
     }
 
@@ -1407,11 +1599,20 @@ public:
             gtSAMgraph.add(PriorFactor<Pose3>(0, trans2gtsamPose(transformTobeMapped), priorNoise));
             initialEstimate.insert(0, trans2gtsamPose(transformTobeMapped));
         }else{
+            // feature matching factor
+            // std::cout << "feature: " << transformTobeMapped[3] << " " << transformTobeMapped[4] << std::endl; 
+            // std::cout << "gicp: " << transformTobeMappedGICP[3] << " " << transformTobeMappedGICP[4] << std::endl; 
             noiseModel::Diagonal::shared_ptr odometryNoise = noiseModel::Diagonal::Variances((Vector(6) << 1e-6, 1e-6, 1e-6, 1e-4, 1e-4, 1e-4).finished());
             gtsam::Pose3 poseFrom = pclPointTogtsamPose3(cloudKeyPoses6D->points.back());
             gtsam::Pose3 poseTo   = trans2gtsamPose(transformTobeMapped);
             gtSAMgraph.add(BetweenFactor<Pose3>(cloudKeyPoses3D->size()-1, cloudKeyPoses3D->size(), poseFrom.between(poseTo), odometryNoise));
             initialEstimate.insert(cloudKeyPoses3D->size(), poseTo);
+            // gicp factor
+            if (useGICPforSLAM && odomGicpConverged) {
+                odometryNoise = noiseModel::Diagonal::Variances((Vector(6) << 1e-4, 1e-4, 1e-4, 1e-3, 1e-3, 1e-3).finished());
+                poseTo   = trans2gtsamPose(transformTobeMappedGICP);
+                gtSAMgraph.add(BetweenFactor<Pose3>(cloudKeyPoses3D->size()-1, cloudKeyPoses3D->size(), poseFrom.between(poseTo), odometryNoise));
+            }
         }
     }
 

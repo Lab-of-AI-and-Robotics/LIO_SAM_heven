@@ -2317,9 +2317,10 @@ public:
         poseCovariance = isam->marginalCovariance(isamCurrentEstimate.size()-1);
 
         // counter for pose correction
-        if (isamCurrentEstimate.size()%5==0) {
-            aLoopIsClosed = true;
-        }
+        // if (isamCurrentEstimate.size()%5==0) {
+        //     aLoopIsClosed = true;
+        // }
+        aLoopIsClosed = true;
 
         // save updated transform
         transformTobeMapped[0] = latestEstimate.rotation().roll();

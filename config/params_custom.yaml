@@ -14,6 +14,7 @@ lio_sam:
 
   # 추가 기능
   manualInitialPose: true
+  useGICPforSLAM: true
 
   # GPS Settings
   useImuHeadingInitialization: true           # if using GPS data, set to "true"

@@ -154,6 +154,7 @@ public:
 
     // riboha
     bool manualInitialPose;
+    bool useGICPforSLAM;
 
     ParamServer()
     {
@@ -252,6 +253,8 @@ public:
 
         // riboha
         nh.param<bool>("lio_sam/manualInitialPose", manualInitialPose, true);
+        nh.param<bool>("lio_sam/useGICPforSLAM", useGICPforSLAM, false);
+        
 
         usleep(100);
     }
